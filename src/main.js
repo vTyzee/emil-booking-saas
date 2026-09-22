@@ -2,6 +2,7 @@ import PocketBase from 'pocketbase';
 import './style.css';
 
 const pbUrl = import.meta.env.VITE_POCKETBASE_URL?.replace(/\/$/, '');
+const stripeServerUrl = import.meta.env.VITE_STRIPE_SERVER_URL?.replace(/\/$/, '') || '';
 const pb = pbUrl ? new PocketBase(pbUrl) : null;
 if (pb) pb.autoCancellation(false);
 const app = document.querySelector('#app');
@@ -47,7 +48,17 @@ function renderBookings() {
   const el = document.querySelector('#my-bookings'); if (!el) return;
   if (!loggedIn()) { el.innerHTML = '<div class="empty">Oma broneeringute vaatamiseks logi sisse.</div>'; return; }
   if (!state.bookings.length) { el.innerHTML = '<div class="empty">Sul ei ole veel broneeringuid. Vali ülevalt endale sobiv aeg!</div>'; return; }
-  el.innerHTML = `<div class="bookings">${state.bookings.map(b => `<div class="booking-item"><span class="booking-cal">▦</span><div><strong>${escapeHTML(b.expand?.slot?.expand?.service?.name || 'Salongiteenus')}</strong><span>${escapeHTML(b.expand?.slot?.starts_at ? dateLabel(b.expand.slot.starts_at) : 'Broneeritud aeg')}</span></div><span class="booking-tag">Kinnitatud</span></div>`).join('')}</div>`;
+  el.innerHTML = `<div class="bookings">${state.bookings.map(b => {
+    const slot = b.expand?.slot;
+    const service = slot?.expand?.service;
+    const canPay = stripeServerUrl && !b.paid && Number(service?.price_eur) === 25 &&
+      Date.parse(slot?.starts_at || '') > Date.now();
+    return `<div class="booking-item"><span class="booking-cal">▦</span><div>
+      <strong>${escapeHTML(service?.name || 'Salongiteenus')}</strong>
+      <span>${escapeHTML(slot?.starts_at ? dateLabel(slot.starts_at) : 'Broneeritud aeg')}</span>
+      ${canPay ? `<button type="button" class="btn btn-outline" data-pay="${escapeHTML(b.id)}">Maksa 25 € (test)</button>` : ''}
+    </div><span class="booking-tag">${b.paid ? 'Makstud (test)' : 'Kinnitatud · tasumata'}</span></div>`;
+  }).join('')}</div>`;
 }
 async function reload() {
   if (!pb) { render(); notice('VITE_POCKETBASE_URL puudub. Lisa oma PocketBase aadress Coolify keskkonnamuutujatesse.', 'error'); return; }
@@ -80,6 +91,10 @@ function bindEvents() {
   document.querySelector('#auth-dialog').addEventListener('click', e => {if(e.target === e.currentTarget) e.currentTarget.close();});
   document.querySelector('#switch-auth').addEventListener('click', () => {state.mode = state.mode === 'login' ? 'register' : 'login'; setAuthMode();});
   document.querySelector('#auth-form').addEventListener('submit', handleAuth);
+  document.querySelector('#my-bookings').addEventListener('click', event => {
+    const button = event.target.closest('[data-pay]');
+    if (button) startCheckout(button.dataset.pay);
+  });
 }
 async function handleAuth(event) {
   event.preventDefault(); if (!pb || state.busy) return;
@@ -95,6 +110,36 @@ async function handleAuth(event) {
   } catch(e) {document.querySelector('#auth-error').textContent = messageFrom(e);}
   finally {state.busy = false; submit.disabled = false;}
 }
+async function startCheckout(bookingId) {
+  if (!pb || !loggedIn() || state.busy || !stripeServerUrl) return;
+  state.busy = true;
+  const button = Array.from(document.querySelectorAll('[data-pay]'))
+    .find(item => item.dataset.pay === bookingId);
+  if (button) button.disabled = true;
+  try {
+    const response = await fetch(`${stripeServerUrl}/api/checkout`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${pb.authStore.token}`
+      },
+      body: JSON.stringify({ bookingId })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || `Makse algatamine ebaõnnestus (${response.status}).`);
+    if (typeof data.url !== 'string' || !data.url.startsWith('https://checkout.stripe.com/')) {
+      throw new Error('Stripe ei tagastanud korrektset makselinki.');
+    }
+    window.location.assign(data.url);
+  } catch (error) {
+    console.error('Stripe test checkout:', error);
+    notice('Testmakset ei saanud avada. Kontrolli Stripe-serveri HTTPS-sertifikaati ja ühendust.', 'error');
+  } finally {
+    state.busy = false;
+    if (button) button.disabled = false;
+  }
+}
+
 async function reserve(slotId) {
   if (!pb) return;
   if (!loggedIn()) {document.querySelector('#auth-dialog').showModal(); return;}
@@ -109,4 +154,14 @@ async function reserve(slotId) {
   } catch(e) {await reload(); notice(e.status === 400 ? 'See aeg on juba broneeritud või pole enam saadaval. Vali teine aeg.' : messageFrom(e), 'error');}
   finally {state.busy = false;}
 }
-reload();
+reload().then(() => {
+  const payment = new URLSearchParams(window.location.search).get('payment');
+  if (payment === 'success') {
+    notice('Naasid Stripe testmaksest. Makse kinnitust kontrollib server; vajadusel värskenda lehte.', 'info');
+  } else if (payment === 'cancelled') {
+    notice('Testmakse katkestati. Broneering jäi alles.', 'info');
+  }
+  if (payment === 'success' || payment === 'cancelled') {
+    window.history.replaceState(null, '', `${window.location.pathname}#minu`);
+  }
+});
