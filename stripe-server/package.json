@@ -1,0 +1,9 @@
+{
+  "name": "stuudio-aeg-stripe-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {"start": "node server.js"},
+  "dependencies": {"express": "^4.21.2", "stripe": "^18.4.0", "pocketbase": "^0.26.0"},
+  "engines": {"node": ">=20"}
+}
